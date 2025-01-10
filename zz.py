@@ -7,15 +7,13 @@
 #           MIT License
 #######################################
 #If you experience any error please let me know
-#version 2.3
+#version 2.4
 from typing import Iterable
 
 from colorama import Fore,Back,Style,init
 from itertools import chain,product,islice
 from optparse import OptionParser
 from zipfile import ZipFile
-
-from numba.core.cgutils import printf
 from pyzipper import AESZipFile
 from multiprocessing import Process, Pool, Event, Manager
 import string
@@ -38,12 +36,16 @@ banner='''
 
 
 class zzCrack():
-    def __init__(self):
-        self.passFound_print = lambda tries, word, start_time: (
+    passFound_print = lambda tries, word, start_time: (
         f"{Style.RESET_ALL}Password was found after {Fore.LIGHTCYAN_EX + str(tries)} {Style.RESET_ALL}tries.\n"
         f"The password is: {Fore.LIGHTGREEN_EX + word}{Style.RESET_ALL}\n"
-        f"Time taken: {Style.BRIGHT + Fore.RED + self.format_time(start_time)}")
-        self.tries_print = lambda tries, word: f"Tries: {tries} > {word}"
+        f"Time taken: {Style.BRIGHT + Fore.RED + zzCrack.format_time(start_time)}")
+    passNotFound_print = lambda tries, start_time: (
+        f"{Style.RESET_ALL}Do not find valid password after {Fore.LIGHTCYAN_EX + str(tries) + Style.RESET_ALL} tries.\n"
+        f"Time taken: {Style.BRIGHT + Fore.RED + zzCrack.format_time(start_time)}"
+    )
+    tries_print = lambda tries, word: f"Tries: {tries} > {word}"
+    def __init__(self):
         self.saves_dir = os.path.dirname(os.path.abspath(__file__))+"/stateSaves"
         self.passFound = False
         self.done = False
@@ -52,7 +54,8 @@ class zzCrack():
     def signal_handler(self, signal, frame):
         self.done = True
 
-    def format_time(self, start_time):
+    @staticmethod
+    def format_time(start_time):
         elapsed_time = time.time() - start_time
         days = int(elapsed_time // (24 * 3600))
         elapsed_time %= (24 * 3600)
@@ -85,11 +88,11 @@ class zzCrack():
                     self.done = False
 
                 tries += 1
-                if stream: print(self.tries_print(tries,word))
+                if stream: print(zzCrack.tries_print(tries,word))
                 z.setpassword(word.encode('utf8', errors='ignore'))
                 z.read(content[0])
                 self.passFound = True
-                print(self.passFound_print(tries,word,start_time))
+                print(zzCrack.passFound_print(tries,word,start_time))
                 return word
             except Exception as ex:
                 pass
@@ -138,7 +141,9 @@ class zzCrack():
             for candidate in chain.from_iterable(product(charlist, repeat=i)
             for i in range(1, max_length + 1)))
 
-    def bruteforce_crack(self, tries, zip_file, stream, charset, max_length):
+    def bruteforce_crack_sp(self, zip_dir, zip_func, stream, charset, max_length):
+        tries = 0
+        zip_file = zip_func(zip_dir, "r")
         content = zip_file.namelist()
         start_time = time.time()
         for word in self.memsafe_generate_bruteforce_list(charset, max_length):
@@ -149,97 +154,89 @@ class zzCrack():
                     self.done = False
 
                 tries += 1
-                if stream: print(self.tries_print(tries,word))
+                if stream: print(zzCrack.tries_print(tries,word))
                 zip_file.setpassword(word.encode('utf8', errors='ignore'))
                 zip_file.read(content[0])
                 self.passFound = True
-                print(self.passFound_print(tries,word,start_time))
+                print(zzCrack.passFound_print(tries,word,start_time))
                 return word
             except Exception as ex:
                 pass
+        print(zzCrack.passNotFound_print(tries,start_time))
 
-    # 生成器分批函数
-    def batched_generator(self, gen:Iterable, batch_size):
+    # Batched giant generator into small pieces
+    @staticmethod
+    def batched_generator(gen:Iterable, batch_size):
         while True:
-            batch = list(islice(gen, batch_size))  # 每次取出 batch_size 个元素
-            if not batch:  # 如果 batch 为空，说明生成器耗尽
+            batch = list(islice(gen, batch_size))  # Take out batch_size elements each time
+            if not batch:
                 break
-            yield iter(batch)  # 将这一批作为一个子生成器返回
+            yield batch  # yield this batch
 
     @staticmethod
-    def bf_crack_unit(gen, zip_dir, stream, stop_event, task_id):
-        tries = 0
-        tries_print = lambda tries, word: f"Tries: {tries} > {word}"
-        zip_func = ZipFile
+    def bf_crack_unit(gen, zip_dir, zip_func, stream, stop_event, tries):
         zip_file = zip_func(zip_dir, "r")
         content = zip_file.namelist()
         for word in gen:
-            # Profiling shows this line causes performance degradation due to synchronization overhead.
+            # Profile shows this check would cause performance degradation due to synchronization overhead.
                 # Exits early if other processes have already succeeded.
                 # if stop_event.is_set():
                 #     return None
             try:
                 tries += 1
-                if stream: print(tries_print(tries,word))
+                if stream: print(zzCrack.tries_print(tries,word))
                 zip_file.setpassword(word.encode('utf8', errors='ignore'))
                 zip_file.read(content[0])
-                print(f"find password: {word}")
                 stop_event.set()
                 return word
             except Exception as ex:
                 pass
         return None
 
-    def bruteforce_crack_mp(self, tries, zip_dir, stream, charset, max_length):
-        try:
-            self.zip_func(zip_dir, "r")
-        except Exception as ex:
-            print(ex)
-            sys.exit(1)
+    def bruteforce_crack_mp(self, zip_dir, zip_func, stream, charset, max_length, pool_size = 4):
+        max_active_tasks = pool_size * 2  # Limit the max active tasks as twice the size of pool to prevent excessive memory usage
+        batch_size = 1000
         start_time = time.time()
         pass_generator = self.memsafe_generate_bruteforce_list(charset, max_length)
-        sub_generators = self.batched_generator(pass_generator, 2000)
+        sub_generators = self.batched_generator(pass_generator, batch_size)
         stop_event = Manager().Event()
-        pool_size = 8  # Size of process pool
-        max_active_tasks = pool_size * 2  # Limit the max active tasks as twice the size of pool to prevent excessive memory usage
         result = None
         with Pool(processes = pool_size) as pool:
-            results = []  # 存储异步结果对象
-            active_tasks = []  # 用于追踪正在运行的任务
+            active_tasks = []
             task_id = 0
             try:
-                # 动态分发任务
+                # Dynamical async apply tasks
                 for sub_gen in sub_generators:
-                    # 如果已经找到密码，退出循环
                     if stop_event.is_set():
                         break
-                    # 异步提交任务
-                    print(f"Apply task: {task_id}")
-                    task = pool.apply_async(self.bf_crack_unit, args=(sub_gen, zip_dir, stream, stop_event, task_id))
+                    if stream:
+                        print(f"Apply task: {task_id}")
+                    task = pool.apply_async(self.bf_crack_unit,
+                                            args=(sub_gen, zip_dir, zip_func, stream, stop_event, task_id * batch_size + 1))
                     task_id += 1
                     active_tasks.append(task)
-                    results.append(task)
 
-                    # 如果当前活动任务数达到限制，则等待至少一个任务完成
+                    # Follow the max_active_tasks limit
                     while len(active_tasks) >= max_active_tasks:
-                        for task in active_tasks:
-                            if task.ready() and task.get() is not None:  # If task finished and find the password
-                                stop_event.set()  # 触发停止事件
-                                result = task.get()
-                                break
-                        # 清理已完成的任务
-                        active_tasks = [task for task in active_tasks if not task.ready()]
+                        # Reverse traversal and remove finished task
+                        for i in range(len(active_tasks) - 1, -1, -1):
+                            task = active_tasks[i]
+                            if task.ready():
+                                active_tasks.pop(i)
+                                if task.get() is not None:
+                                    # Trigger stop event, if task finished and find the password
+                                    stop_event.set()
+                                    result = task.get()
 
                         # Block a short period to avoid excessive cycling
                         time.sleep(0.01)
 
-
                 # Wait all tasks finished
                 for task in active_tasks:
-                    if not task.ready():
-                        task.wait()
+                    task.wait()
                     if task.get() is not None:
                         break
+
             except KeyboardInterrupt:
                 print("Terminating due to user interruption.")
             finally:
@@ -252,24 +249,26 @@ class zzCrack():
                 stop_event.set()
                 result = active_tasks[0].get()
             active_tasks.remove(active_tasks[0])
+
         if result is not None:
-            print(f"Cracked password(s): {result}")
+            print(zzCrack.passFound_print(task_id * batch_size, result, start_time))
         else:
-            print("Failed to crack the password!")
+            print(zzCrack.passNotFound_print(task_id * batch_size, start_time))
         return result
 
 
     def bruteforce_crack_entry(self, archive_dir, charset, max_letters, showoutput_b, resume_index):
-        tries = 0
         try:
             try: _archive = self.zip_func(archive_dir, "r")
             except Exception as ex: print(ex); sys.exit(1)
             print("Started...")
-            self.bruteforce_crack(tries,_archive,showoutput_b, charset, max_letters)
+            if options.process_num is not None and int(options.process_num) > 1:
+                self.bruteforce_crack_mp(archive_dir, self.zip_func, showoutput_b, charset, max_letters, int(options.process_num))
+            else:
+                self.bruteforce_crack_sp(archive_dir, self.zip_func, showoutput_b, charset, max_letters)
         except IOError:
             print("zip_file Doesn't Exist")
             sys.exit(1)
-
 
     ######################
     # Restore/Save state
@@ -431,14 +430,15 @@ if __name__ == "__main__":
     parser.add_option("-s", "--stream",
                     action="store_true", dest="showoutput", default=False,
                     help="Stream tried passwords (slower)")
-    #restore
     parser.add_option("-r", "--restore", dest="restore",
                     help="Restore state From save (do --rl for a list of valid options)", metavar=" ")
     parser.add_option("--rl",
                     action="store_true", dest="reslist", default=False,
                     help="Shows a list of all restore files found")
-    parser.add_option("--use-pyzipper", action="store_true", dest="use_pyzipper", default=False,
-                    help="Use pyzipper instead of zip_file to deal with AES encryption")
+    parser.add_option("--aes", "--use-pyzipper", action="store_true", dest="use_pyzipper", default=False,
+                    help="Use pyzipper lib to deal with AES encrypted zip file")
+    parser.add_option("-p", dest = "process_num", default = 1, metavar="NUMBER",
+                    help="Set the number of processes used in crack password (Limited for Bruteforce)")
     (options, args) = parser.parse_args()
 
     init()
