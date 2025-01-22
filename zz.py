@@ -144,7 +144,6 @@ class zzCrack():
     def bruteforce_crack_sp(self, zip_dir, zip_func, stream, charset, max_length):
         tries = 0
         zip_file = zip_func(zip_dir, "r")
-        content = zip_file.namelist()
         start_time = time.time()
         for word in self.memsafe_generate_bruteforce_list(charset, max_length):
             try:
@@ -156,7 +155,12 @@ class zzCrack():
                 tries += 1
                 if stream: print(zzCrack.tries_print(tries,word))
                 zip_file.setpassword(word.encode('utf8', errors='ignore'))
-                zip_file.read(content[0])
+                error_filename = zip_file.testzip()
+                if error_filename is not None:
+                    continue
+
+                # content = zip_file.namelist()
+                # zip_file.read(content[0])
                 self.passFound = True
                 print(zzCrack.passFound_print(tries,word,start_time))
                 return word
@@ -176,9 +180,8 @@ class zzCrack():
     @staticmethod
     def bf_crack_unit(gen, zip_dir, zip_func, stream, stop_event, tries):
         zip_file = zip_func(zip_dir, "r")
-        content = zip_file.namelist()
         for word in gen:
-            # Profile shows this check would cause performance degradation due to synchronization overhead.
+            # Profile shows check stop_event would cause performance degradation due to synchronization overhead.
                 # Exits early if other processes have already succeeded.
                 # if stop_event.is_set():
                 #     return None
@@ -186,7 +189,12 @@ class zzCrack():
                 tries += 1
                 if stream: print(zzCrack.tries_print(tries,word))
                 zip_file.setpassword(word.encode('utf8', errors='ignore'))
-                zip_file.read(content[0])
+                error_filename = zip_file.testzip()
+                if error_filename is not None:
+                    continue
+
+                # content = zip_file.namelist()
+                # zip_file.read(content[0])
                 stop_event.set()
                 return word
             except Exception as ex:
